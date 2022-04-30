@@ -13,17 +13,6 @@ mod marching_cube_tables;
 
 const CHUNK_SIZE: usize = 4;
 const TIMER_DURATION: f32 = 0.25;
-//     4--------5     *-----4------*
-//    /|       /|    /|           /|
-//   / |      / |   7 |          5 |
-//  /  |     /  |  /  8         /  9
-// 7--------6   | *------6-----*   |
-// |   |    |   | |   |        |   |
-// |   0----|---1 |   *-----0--|---*
-// |  /     |  /  11 /         10 /
-// | /      | /   | 3          | 1
-// |/       |/    |/           |/
-// 3--------2     *-----2------*
 
 #[derive(Default)]
 struct UpdatePointsMesh;
@@ -232,6 +221,7 @@ fn update_chunk(
         return;
     }
 
+    // TODO loop on multiple chunks at the same time
     match chunk.iter_3d.next() {
         Some(pos) => {
             let pos = pos.as_vec3();
@@ -242,7 +232,7 @@ fn update_chunk(
                 grid_cell.value[i] = chunk.get(*v_pos);
             }
 
-            if let Some(triangles) = polygonize(&grid_cell, 1.0) {
+            if let Some(triangles) = march_cube(&grid_cell, 1.0) {
                 commands
                     .spawn_bundle(PbrBundle {
                         mesh: meshes.add(Mesh::from(GridCellMesh(triangles))),
@@ -317,7 +307,19 @@ fn update_points_mesh(
     }
 }
 
-fn polygonize(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
+/// March a single cube
+//     4--------5     *-----4------*
+//    /|       /|    /|           /|
+//   / |      / |   7 |          5 |
+//  /  |     /  |  /  8         /  9
+// 7--------6   | *------6-----*   |
+// |   |    |   | |   |        |   |
+// |   0----|---1 |   *-----0--|---*
+// |  /     |  /  11 /         10 /
+// | /      | /   | 3          | 1
+// |/       |/    |/           |/
+// 3--------2     *-----2------*
+fn march_cube(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
     let mut cube_index: usize = 0;
     for i in 0..8 {
         if grid.value[i] < isolevel {

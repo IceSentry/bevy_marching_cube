@@ -79,22 +79,32 @@ impl Chunk {
 }
 
 fn main() {
-    App::new()
-        .insert_resource(WireframeConfig { global: false })
-        .add_plugins(DefaultPlugins)
-        .add_plugin(WireframePlugin)
-        .add_plugins(DefaultPickingPlugins)
-        .add_plugin(DebugCursorPickingPlugin) // <- Adds the green debug cursor.
-        .add_event::<UpdatePointsMesh>()
-        .add_event::<StartMarching>()
-        .add_startup_system(setup)
-        .add_startup_system(setup_points)
-        .add_system(select_event)
-        .add_system(update_points_mesh.after(select_event))
-        .add_system(update_chunk.after(select_event))
-        .add_system(camera::fly_camera)
-        .add_system(start_march)
-        .run();
+    let mut app = App::new();
+    app.insert_resource(WindowDescriptor {
+        #[cfg(target_arch = "wasm32")]
+        canvas: Some(String::from("#bevy")),
+        ..default()
+    })
+    .add_plugins(DefaultPlugins)
+    .add_plugins(DefaultPickingPlugins)
+    .add_plugin(DebugCursorPickingPlugin) // <- Adds the green debug cursor.
+    .add_event::<UpdatePointsMesh>()
+    .add_event::<StartMarching>()
+    .add_startup_system(setup)
+    .add_startup_system(setup_points)
+    .add_system(select_event)
+    .add_system(update_points_mesh.after(select_event))
+    .add_system(update_chunk.after(select_event))
+    .add_system(camera::fly_camera)
+    .add_system(start_march);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        app.add_plugin(WireframePlugin)
+            .insert_resource(WireframeConfig { global: false });
+    }
+
+    app.run();
 }
 
 fn setup(mut commands: Commands) {

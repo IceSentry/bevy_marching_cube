@@ -6,13 +6,14 @@ use bevy::{
 use bevy_mod_picking::*;
 use iters::Iter3d;
 use marching_cube_tables::{EDGE_CONNECTION, EDGE_TABLE, TRIANGLE_TABLE};
+use noise::{NoiseFn, OpenSimplex};
 
 mod camera;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 4;
-const TIMER_DURATION: f32 = 0.25;
+const CHUNK_SIZE: usize = 10;
+const TIMER_DURATION: f32 = 0.00001;
 
 #[derive(Default)]
 struct UpdatePointsMesh;
@@ -31,7 +32,7 @@ struct MarchCubeIndicator;
 #[derive(Component)]
 struct ChunkPoint;
 
-#[derive(Clone)]
+#[derive(Component, Clone)]
 struct Chunk {
     points: Vec<f32>,
     size: usize,
@@ -60,15 +61,6 @@ impl Chunk {
         self.points[index] = value;
     }
 
-    fn get_pos_from_index(&self, idx: usize) -> Vec3 {
-        let mut idx = idx;
-        let z = idx / (self.size * self.size);
-        idx -= z * self.size * self.size;
-        let y = idx / self.size;
-        let x = idx % self.size;
-        Vec3::new(x as f32, y as f32, z as f32)
-    }
-
     fn reset_iter(&mut self) {
         self.iter_3d = Chunk::new_iter(self.size as u32);
     }
@@ -86,17 +78,18 @@ fn main() {
         ..default()
     })
     .add_plugins(DefaultPlugins)
-    .add_plugins(DefaultPickingPlugins)
+    .add_plugin(PickingPlugin)
+    .add_plugin(InteractablePickingPlugin)
     .add_plugin(DebugCursorPickingPlugin) // <- Adds the green debug cursor.
     .add_event::<UpdatePointsMesh>()
     .add_event::<StartMarching>()
     .add_startup_system(setup)
     .add_startup_system(setup_points)
     .add_system(select_event)
-    .add_system(update_points_mesh.after(select_event))
     .add_system(update_chunk.after(select_event))
     .add_system(camera::fly_camera)
-    .add_system(start_march);
+    .add_system(start_march)
+    .add_system(update_points_color);
 
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -139,11 +132,20 @@ fn setup_points(
 
     let black = materials.add(Color::BLACK.into());
 
+    let simplex = OpenSimplex::new();
     let mut points = Vec::new();
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
-                points.push(0.0);
+                let max = CHUNK_SIZE - 1;
+                let val = if x == 0 || x == max || y == 0 || y == max || z == 0 || z == max {
+                    // make border empty
+                    0.0
+                } else {
+                    let val = simplex.get([x as f64, y as f64, z as f64]);
+                    (val + 1.0) / 2.0
+                };
+                points.push(val as f32);
                 commands
                     .spawn_bundle(PbrBundle {
                         mesh: icosphere.clone(),
@@ -156,14 +158,13 @@ fn setup_points(
             }
         }
     }
-
-    commands.insert_resource(Chunk::new(points, CHUNK_SIZE));
+    commands.spawn().insert(Chunk::new(points, CHUNK_SIZE));
     commands.insert_resource(MarchTimer(Timer::from_seconds(TIMER_DURATION, true)));
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
             material: materials.add(StandardMaterial {
-                base_color: Color::rgba(0.0, 0.0, 1.0, 0.5),
+                base_color: Color::rgba(0.0, 0.0, 1.0, 0.25),
                 alpha_mode: AlphaMode::Blend,
                 ..default()
             }),
@@ -176,9 +177,10 @@ fn setup_points(
 fn select_event(
     mut events: EventReader<PickingEvent>,
     transforms: Query<&Transform>,
-    mut chunk: ResMut<Chunk>,
+    mut chunks: Query<&mut Chunk>,
     mut update_events: EventWriter<UpdatePointsMesh>,
 ) {
+    let mut chunk = chunks.single_mut();
     for event in events.iter() {
         if let PickingEvent::Clicked(entity) = event {
             if let Ok(&Transform { translation, .. }) = transforms.get(*entity) {
@@ -202,7 +204,7 @@ fn start_march(
 fn update_chunk(
     mut commands: Commands,
     time: Res<Time>,
-    mut chunk: ResMut<Chunk>,
+    mut chunks: Query<&mut Chunk>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut timer: ResMut<MarchTimer>,
@@ -212,6 +214,7 @@ fn update_chunk(
     mut marching: Local<bool>,
 ) {
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
+    let mut chunk = chunks.single_mut();
 
     if start_event.iter().count() > 0 {
         info!("Start marching");
@@ -221,6 +224,7 @@ fn update_chunk(
         indicator_visibility.is_visible = true;
         *marching = true;
         indicator_transform.translation = Vec3::new(0.5, 0.5, 0.5);
+        chunk.reset_iter();
     }
 
     if !*marching {
@@ -242,14 +246,15 @@ fn update_chunk(
                 grid_cell.value[i] = chunk.get(*v_pos);
             }
 
-            if let Some(triangles) = march_cube(&grid_cell, 1.0) {
+            // TODO add triangles to chunk mesh instead of spawning new mesh
+            if let Some(triangles) = march_cube(&grid_cell, 0.55) {
                 commands
                     .spawn_bundle(PbrBundle {
                         mesh: meshes.add(Mesh::from(GridCellMesh(triangles))),
                         material: materials.add(StandardMaterial {
-                            base_color: Color::rgba(1.0, 0.0, 0.0, 0.75),
-                            alpha_mode: AlphaMode::Blend,
-                            cull_mode: None,
+                            base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                            // alpha_mode: AlphaMode::Blend,
+                            // cull_mode: None,
                             ..default()
                         }),
                         ..default()
@@ -267,52 +272,16 @@ fn update_chunk(
     }
 }
 
-fn update_points_mesh(
-    mut commands: Commands,
-    chunk: Res<Chunk>,
-    mut meshes: ResMut<Assets<Mesh>>,
+// TODO make the chunk more granular so it doesn't trigger an update when iterating
+fn update_points_color(
+    chunk: Query<&Chunk, Changed<Chunk>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    chunk_points: Query<Entity, With<ChunkPoint>>,
-    mut update_events: EventReader<UpdatePointsMesh>,
+    mut q: Query<(&Transform, &mut Handle<StandardMaterial>), With<ChunkPoint>>,
 ) {
-    if update_events.iter().count() == 0 {
-        return;
-    }
-
-    for entity in chunk_points.iter() {
-        commands.entity(entity).despawn();
-    }
-
-    let icosphere = meshes.add(Mesh::from(shape::Icosphere {
-        radius: 0.05,
-        ..default()
-    }));
-
-    let black = materials.add(Color::BLACK.into());
-    let white = materials.add(Color::WHITE.into());
-
-    // TODO don't spawn, just change the material
-    let mut spawn_point = |pos| {
-        commands
-            .spawn_bundle(PbrBundle {
-                mesh: icosphere.clone(),
-                material: if chunk.get(pos) == 1.0 {
-                    white.clone()
-                } else {
-                    black.clone()
-                },
-                transform: Transform::from_translation(pos),
-                ..default()
-            })
-            .insert_bundle(PickableBundle::default())
-            .insert(ChunkPoint);
-    };
-
-    for x in 0..chunk.size {
-        for y in 0..chunk.size {
-            for z in 0..chunk.size {
-                spawn_point(Vec3::new(x as f32, y as f32, z as f32));
-            }
+    for chunk in chunk.iter() {
+        for (transform, mut mat) in q.iter_mut() {
+            let val = chunk.get(transform.translation);
+            *mat = materials.add(Color::rgb(val, val, val).into());
         }
     }
 }
@@ -373,20 +342,20 @@ fn march_cube(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
 
 // Interpolate between 2 vertices proportional to isolevel
 fn vertex_interp(isolevel: f32, p1: Vec3, p2: Vec3, valp1: f32, valp2: f32) -> Vec3 {
-    // if (isolevel - valp1).abs() < 0.00001 {
-    //     return p1;
-    // }
-    // if (isolevel - valp2).abs() < 0.00001 {
-    //     return p2;
-    // }
-    // if (valp1 - valp2).abs() < 0.00001 {
-    //     return p1;
-    // }
-    // let mu = (isolevel - valp1) / (valp2 - valp1);
-    // p1 + mu * (p2 - p1)
+    if (isolevel - valp1).abs() < 0.00001 {
+        return p1;
+    }
+    if (isolevel - valp2).abs() < 0.00001 {
+        return p2;
+    }
+    if (valp1 - valp2).abs() < 0.00001 {
+        return p1;
+    }
+    let mu = (isolevel - valp1) / (valp2 - valp1);
+    p1 + mu * (p2 - p1)
 
     // always pick the mid-point
-    (p1 + p2) / 2.0
+    // (p1 + p2) / 2.0
 }
 
 type Triangle = [Vec3; 3];

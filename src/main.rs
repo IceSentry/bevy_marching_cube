@@ -1,18 +1,19 @@
 use bevy::{
     pbr::wireframe::{Wireframe, WireframeConfig, WireframePlugin},
     prelude::*,
-    render::mesh::PrimitiveTopology,
 };
 use bevy_mod_picking::*;
+use chunk::{Chunk, ChunkMesh};
 use iters::Iter3d;
 use marching_cube_tables::{EDGE_CONNECTION, EDGE_TABLE, TRIANGLE_TABLE};
 use noise::{NoiseFn, OpenSimplex};
 
 mod camera;
+mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 10;
+const CHUNK_SIZE: usize = 16;
 const TIMER_DURATION: f32 = 0.00001;
 const ISOLEVEL: f32 = 0.55;
 
@@ -32,35 +33,6 @@ struct MarchCubeIndicator;
 
 #[derive(Component)]
 struct ChunkPoint;
-
-#[derive(Component, Clone)]
-struct Chunk {
-    points: Vec<f32>,
-    size: usize,
-}
-
-impl Chunk {
-    fn new(points: Vec<f32>, size: usize) -> Self {
-        Self { points, size }
-    }
-
-    fn index(&self, pos: Vec3) -> usize {
-        (pos.z as usize * self.size * self.size) + (pos.y as usize * self.size) + pos.x as usize
-    }
-
-    fn get(&self, pos: Vec3) -> f32 {
-        self.points[self.index(pos)]
-    }
-
-    fn set(&mut self, pos: Vec3, value: f32) {
-        let index = self.index(pos);
-        self.points[index] = value;
-    }
-
-    fn new_iter(size: u32) -> Iter3d {
-        Iter3d::new(UVec3::ZERO, UVec3::new(size - 2, size - 2, size - 2))
-    }
-}
 
 fn main() {
     let mut app = App::new();
@@ -85,8 +57,8 @@ fn main() {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        app.add_plugin(WireframePlugin)
-            .insert_resource(WireframeConfig { global: false });
+        // app.add_plugin(WireframePlugin)
+        // .insert_resource(WireframeConfig { global: false });
     }
 
     app.run();
@@ -107,7 +79,7 @@ fn setup(mut commands: Commands) {
             shadows_enabled: false,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
+        transform: Transform::from_xyz(4.0, 10.0, -5.0),
         ..default()
     });
 }
@@ -151,10 +123,22 @@ fn setup_points(
         }
     }
 
+    let chunk_mesh = ChunkMesh::default();
+
     commands
         .spawn()
         .insert(Chunk::new(points, CHUNK_SIZE))
-        .insert(Chunk::new_iter(CHUNK_SIZE as u32));
+        .insert(Chunk::new_iter(CHUNK_SIZE as u32))
+        .insert(chunk_mesh.clone())
+        .insert_bundle(PbrBundle {
+            mesh: meshes.add(Mesh::from(chunk_mesh)),
+            material: materials.add(StandardMaterial {
+                base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                ..default()
+            }),
+            ..default()
+        })
+        .insert(Wireframe);
 
     commands.insert_resource(MarchTimer(Timer::from_seconds(TIMER_DURATION, true)));
 
@@ -201,29 +185,26 @@ fn start_march(
 }
 
 fn update_chunk(
-    mut commands: Commands,
     time: Res<Time>,
-    mut chunks: Query<(&Chunk, &mut Iter3d)>,
+    mut chunks: Query<(&Chunk, &mut Iter3d, &mut ChunkMesh, &mut Handle<Mesh>)>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut timer: ResMut<MarchTimer>,
     mut start_event: EventReader<StartMarching>,
-    generated_meshes: Query<Entity, With<GridCellGeneratedMesh>>,
     mut indicator: Query<(&mut Transform, &mut Visibility), With<MarchCubeIndicator>>,
     mut marching: Local<bool>,
 ) {
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
-    let (chunk, mut chunk_iter) = chunks.single_mut();
+
+    // TODO loop on multiple chunks at the same time
+    let (chunk, mut chunk_iter, mut chunk_mesh, mut mesh_handle) = chunks.single_mut();
 
     if start_event.iter().count() > 0 {
         info!("Start marching");
         *marching = true;
-        for entity in generated_meshes.iter() {
-            commands.entity(entity).despawn();
-        }
         indicator_visibility.is_visible = true;
         indicator_transform.translation = Vec3::new(0.5, 0.5, 0.5);
         chunk_iter.reset();
+        chunk_mesh.triangles.clear();
     }
 
     if !*marching {
@@ -234,7 +215,6 @@ fn update_chunk(
         return;
     }
 
-    // TODO loop on multiple chunks at the same time
     match chunk_iter.next() {
         Some(pos) => {
             let pos = pos.as_vec3();
@@ -245,21 +225,9 @@ fn update_chunk(
                 grid_cell.value[i] = chunk.get(*v_pos);
             }
 
-            // TODO add triangles to chunk mesh instead of spawning new mesh
             if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
-                commands
-                    .spawn_bundle(PbrBundle {
-                        mesh: meshes.add(Mesh::from(GridCellMesh(triangles))),
-                        material: materials.add(StandardMaterial {
-                            base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
-                            // alpha_mode: AlphaMode::Blend,
-                            // cull_mode: None,
-                            ..default()
-                        }),
-                        ..default()
-                    })
-                    .insert(GridCellGeneratedMesh)
-                    .insert(Wireframe);
+                chunk_mesh.triangles.extend(triangles);
+                *mesh_handle = meshes.add(Mesh::from(chunk_mesh.clone()));
             }
         }
         None => {
@@ -271,7 +239,6 @@ fn update_chunk(
     }
 }
 
-// TODO make the chunk more granular so it doesn't trigger an update when iterating
 fn update_points_color(
     chunk: Query<&Chunk, Changed<Chunk>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -281,7 +248,6 @@ fn update_points_color(
         for (transform, mut mat, mut visibility) in q.iter_mut() {
             let val = chunk.get(transform.translation);
             *mat = materials.add(Color::rgb(val, val, val).into());
-
             visibility.is_visible = val >= ISOLEVEL;
         }
     }
@@ -361,11 +327,6 @@ fn vertex_interp(isolevel: f32, p1: Vec3, p2: Vec3, valp1: f32, valp2: f32) -> V
 
 type Triangle = [Vec3; 3];
 
-struct GridCellMesh(Vec<Triangle>);
-
-#[derive(Component)]
-struct GridCellGeneratedMesh;
-
 #[derive(Clone, Copy)]
 struct GridCell {
     vertex_position: [Vec3; 8],
@@ -387,30 +348,5 @@ impl GridCell {
             vertex_position,
             value: [0.0; 8],
         }
-    }
-}
-
-impl From<GridCellMesh> for Mesh {
-    fn from(grid_cell: GridCellMesh) -> Self {
-        let mut vertices = Vec::with_capacity(grid_cell.0.len());
-        for triangle_vertices in grid_cell.0 {
-            for vertex in triangle_vertices {
-                vertices.push(([vertex.x, vertex.y, vertex.z], [0.0, 0.0]));
-            }
-        }
-
-        let mut positions = Vec::new();
-        let mut uvs = Vec::new();
-        vertices.reverse();
-        for (position, uv) in &vertices {
-            positions.push(*position);
-            uvs.push(*uv);
-        }
-
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.compute_flat_normals();
-        mesh
     }
 }

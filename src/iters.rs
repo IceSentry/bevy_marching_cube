@@ -2,12 +2,13 @@ use bevy::prelude::*;
 
 /// Linear iterator across a 3D coordinate space.
 /// This iterator is inclusive of minimum and maximum coordinates.
-#[derive(Clone)]
+#[derive(Component, Copy, Clone)]
 pub struct Iter3d {
     track: UVec3,
     min: UVec3,
     max: UVec3,
 }
+
 impl Iter3d {
     #[must_use]
     pub fn new(min: UVec3, max: UVec3) -> Self {
@@ -17,7 +18,12 @@ impl Iter3d {
             max,
         }
     }
+
+    pub fn reset(&mut self) {
+        self.track = self.min;
+    }
 }
+
 impl Iterator for Iter3d {
     type Item = UVec3;
 
@@ -54,12 +60,5 @@ mod tests {
     fn test() {
         let mut iter = Iter3d::new(UVec3::ZERO, UVec3::new(2, 2, 2));
         assert_eq!(iter.next(), Some(UVec3::ZERO));
-
-        for i in iter {
-            println!("{}", i);
-        }
-
-        // assert_eq!(iter.next(), Some(UVec3::new(1, 0, 0)));
-        // assert_eq!(iter.next(), Some(UVec3::new(0, 1, 0)));
     }
 }

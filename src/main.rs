@@ -14,6 +14,7 @@ mod marching_cube_tables;
 
 const CHUNK_SIZE: usize = 10;
 const TIMER_DURATION: f32 = 0.00001;
+const ISOLEVEL: f32 = 0.55;
 
 #[derive(Default)]
 struct UpdatePointsMesh;
@@ -36,16 +37,11 @@ struct ChunkPoint;
 struct Chunk {
     points: Vec<f32>,
     size: usize,
-    iter_3d: Iter3d,
 }
 
 impl Chunk {
     fn new(points: Vec<f32>, size: usize) -> Self {
-        Self {
-            points,
-            size,
-            iter_3d: Chunk::new_iter(size as u32),
-        }
+        Self { points, size }
     }
 
     fn index(&self, pos: Vec3) -> usize {
@@ -59,10 +55,6 @@ impl Chunk {
     fn set(&mut self, pos: Vec3, value: f32) {
         let index = self.index(pos);
         self.points[index] = value;
-    }
-
-    fn reset_iter(&mut self) {
-        self.iter_3d = Chunk::new_iter(self.size as u32);
     }
 
     fn new_iter(size: u32) -> Iter3d {
@@ -158,8 +150,15 @@ fn setup_points(
             }
         }
     }
-    commands.spawn().insert(Chunk::new(points, CHUNK_SIZE));
+
+    commands
+        .spawn()
+        .insert(Chunk::new(points, CHUNK_SIZE))
+        .insert(Chunk::new_iter(CHUNK_SIZE as u32));
+
     commands.insert_resource(MarchTimer(Timer::from_seconds(TIMER_DURATION, true)));
+
+    // TODO insert it as child of chunk?
     commands
         .spawn_bundle(PbrBundle {
             mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
@@ -204,7 +203,7 @@ fn start_march(
 fn update_chunk(
     mut commands: Commands,
     time: Res<Time>,
-    mut chunks: Query<&mut Chunk>,
+    mut chunks: Query<(&Chunk, &mut Iter3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut timer: ResMut<MarchTimer>,
@@ -214,17 +213,17 @@ fn update_chunk(
     mut marching: Local<bool>,
 ) {
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
-    let mut chunk = chunks.single_mut();
+    let (chunk, mut chunk_iter) = chunks.single_mut();
 
     if start_event.iter().count() > 0 {
         info!("Start marching");
+        *marching = true;
         for entity in generated_meshes.iter() {
             commands.entity(entity).despawn();
         }
         indicator_visibility.is_visible = true;
-        *marching = true;
         indicator_transform.translation = Vec3::new(0.5, 0.5, 0.5);
-        chunk.reset_iter();
+        chunk_iter.reset();
     }
 
     if !*marching {
@@ -236,7 +235,7 @@ fn update_chunk(
     }
 
     // TODO loop on multiple chunks at the same time
-    match chunk.iter_3d.next() {
+    match chunk_iter.next() {
         Some(pos) => {
             let pos = pos.as_vec3();
             indicator_transform.translation = pos + Vec3::new(0.5, 0.5, 0.5);
@@ -247,7 +246,7 @@ fn update_chunk(
             }
 
             // TODO add triangles to chunk mesh instead of spawning new mesh
-            if let Some(triangles) = march_cube(&grid_cell, 0.55) {
+            if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
                 commands
                     .spawn_bundle(PbrBundle {
                         mesh: meshes.add(Mesh::from(GridCellMesh(triangles))),
@@ -265,9 +264,9 @@ fn update_chunk(
         }
         None => {
             info!("Marching is over");
-            indicator_visibility.is_visible = false;
-            chunk.reset_iter();
             *marching = false;
+            indicator_visibility.is_visible = false;
+            chunk_iter.reset();
         }
     }
 }
@@ -276,12 +275,14 @@ fn update_chunk(
 fn update_points_color(
     chunk: Query<&Chunk, Changed<Chunk>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&Transform, &mut Handle<StandardMaterial>), With<ChunkPoint>>,
+    mut q: Query<(&Transform, &mut Handle<StandardMaterial>, &mut Visibility), With<ChunkPoint>>,
 ) {
     for chunk in chunk.iter() {
-        for (transform, mut mat) in q.iter_mut() {
+        for (transform, mut mat, mut visibility) in q.iter_mut() {
             let val = chunk.get(transform.translation);
             *mat = materials.add(Color::rgb(val, val, val).into());
+
+            visibility.is_visible = val >= ISOLEVEL;
         }
     }
 }
@@ -342,20 +343,20 @@ fn march_cube(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
 
 // Interpolate between 2 vertices proportional to isolevel
 fn vertex_interp(isolevel: f32, p1: Vec3, p2: Vec3, valp1: f32, valp2: f32) -> Vec3 {
-    if (isolevel - valp1).abs() < 0.00001 {
-        return p1;
-    }
-    if (isolevel - valp2).abs() < 0.00001 {
-        return p2;
-    }
-    if (valp1 - valp2).abs() < 0.00001 {
-        return p1;
-    }
-    let mu = (isolevel - valp1) / (valp2 - valp1);
-    p1 + mu * (p2 - p1)
+    // if (isolevel - valp1).abs() < 0.00001 {
+    //     return p1;
+    // }
+    // if (isolevel - valp2).abs() < 0.00001 {
+    //     return p2;
+    // }
+    // if (valp1 - valp2).abs() < 0.00001 {
+    //     return p1;
+    // }
+    // let mu = (isolevel - valp1) / (valp2 - valp1);
+    // p1 + mu * (p2 - p1)
 
     // always pick the mid-point
-    // (p1 + p2) / 2.0
+    (p1 + p2) / 2.0
 }
 
 type Triangle = [Vec3; 3];

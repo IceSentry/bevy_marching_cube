@@ -13,7 +13,7 @@ mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 16;
+const CHUNK_SIZE: usize = 10;
 const TIMER_DURATION: f32 = 0.00001;
 const ISOLEVEL: f32 = 0.55;
 
@@ -57,8 +57,8 @@ fn main() {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // app.add_plugin(WireframePlugin)
-        // .insert_resource(WireframeConfig { global: false });
+        app.add_plugin(WireframePlugin)
+            .insert_resource(WireframeConfig { global: false });
     }
 
     app.run();
@@ -97,6 +97,8 @@ fn setup_points(
     let black = materials.add(Color::BLACK.into());
 
     let simplex = OpenSimplex::new();
+
+    // TODO spawn multiple chunks
     let mut points = Vec::new();
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
@@ -248,7 +250,7 @@ fn update_points_color(
         for (transform, mut mat, mut visibility) in q.iter_mut() {
             let val = chunk.get(transform.translation);
             *mat = materials.add(Color::rgb(val, val, val).into());
-            visibility.is_visible = val >= ISOLEVEL;
+            visibility.is_visible = val >= ISOLEVEL || val == 0.0;
         }
     }
 }
@@ -299,9 +301,9 @@ fn march_cube(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
             break;
         }
         triangles.push([
-            vertices[triangulation[i] as usize],
-            vertices[triangulation[i + 1] as usize],
             vertices[triangulation[i + 2] as usize],
+            vertices[triangulation[i + 1] as usize],
+            vertices[triangulation[i] as usize],
         ]);
     }
     Some(triangles)
@@ -309,20 +311,20 @@ fn march_cube(grid: &GridCell, isolevel: f32) -> Option<Vec<Triangle>> {
 
 // Interpolate between 2 vertices proportional to isolevel
 fn vertex_interp(isolevel: f32, p1: Vec3, p2: Vec3, valp1: f32, valp2: f32) -> Vec3 {
-    // if (isolevel - valp1).abs() < 0.00001 {
-    //     return p1;
-    // }
-    // if (isolevel - valp2).abs() < 0.00001 {
-    //     return p2;
-    // }
-    // if (valp1 - valp2).abs() < 0.00001 {
-    //     return p1;
-    // }
-    // let mu = (isolevel - valp1) / (valp2 - valp1);
-    // p1 + mu * (p2 - p1)
+    if (isolevel - valp1).abs() < 0.00001 {
+        return p1;
+    }
+    if (isolevel - valp2).abs() < 0.00001 {
+        return p2;
+    }
+    if (valp1 - valp2).abs() < 0.00001 {
+        return p1;
+    }
+    let mu = (isolevel - valp1) / (valp2 - valp1);
+    p1 + mu * (p2 - p1)
 
     // always pick the mid-point
-    (p1 + p2) / 2.0
+    // (p1 + p2) / 2.0
 }
 
 type Triangle = [Vec3; 3];

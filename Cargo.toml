@@ -11,5 +11,9 @@ opt-level = 3
 
 [dependencies]
 bevy = "0.7.0"
+# bevy = { path = "../bevy" }
 bevy_mod_picking = "0.6"
 noise = "0.7.0"
+
+[patch."https://github.com/bevyengine/bevy"]
+# bevy = { path = "../bevy" }

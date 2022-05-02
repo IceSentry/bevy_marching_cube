@@ -18,9 +18,6 @@ const TIMER_DURATION: f32 = 0.00001;
 const ISOLEVEL: f32 = 0.55;
 
 #[derive(Default)]
-struct UpdatePointsMesh;
-
-#[derive(Default)]
 struct StartMarching;
 
 #[derive(Component)]
@@ -45,7 +42,6 @@ fn main() {
     .add_plugin(PickingPlugin)
     .add_plugin(InteractablePickingPlugin)
     .add_plugin(DebugCursorPickingPlugin) // <- Adds the green debug cursor.
-    .add_event::<UpdatePointsMesh>()
     .add_event::<StartMarching>()
     .add_startup_system(setup)
     .add_startup_system(setup_points)
@@ -139,8 +135,8 @@ fn setup_points(
                 ..default()
             }),
             ..default()
-        })
-        .insert(Wireframe);
+        });
+    // .insert(Wireframe);
 
     commands.insert_resource(MarchTimer(Timer::from_seconds(TIMER_DURATION, true)));
 
@@ -163,7 +159,6 @@ fn select_event(
     mut events: EventReader<PickingEvent>,
     transforms: Query<&Transform>,
     mut chunks: Query<&mut Chunk>,
-    mut update_events: EventWriter<UpdatePointsMesh>,
 ) {
     let mut chunk = chunks.single_mut();
     for event in events.iter() {
@@ -171,7 +166,6 @@ fn select_event(
             if let Ok(&Transform { translation, .. }) = transforms.get(*entity) {
                 let value = chunk.get(translation);
                 chunk.set(translation, if value == 1.0 { 0.0 } else { 1.0 });
-                update_events.send_default();
             }
         }
     }
@@ -188,7 +182,7 @@ fn start_march(
 
 fn update_chunk(
     time: Res<Time>,
-    mut chunks: Query<(&Chunk, &mut Iter3d, &mut ChunkMesh, &mut Handle<Mesh>)>,
+    mut chunks: Query<(&Chunk, &mut Iter3d, &mut ChunkMesh, &Handle<Mesh>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut timer: ResMut<MarchTimer>,
     mut start_event: EventReader<StartMarching>,
@@ -198,7 +192,7 @@ fn update_chunk(
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
 
     // TODO loop on multiple chunks at the same time
-    let (chunk, mut chunk_iter, mut chunk_mesh, mut mesh_handle) = chunks.single_mut();
+    let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle) = chunks.single_mut();
 
     if start_event.iter().count() > 0 {
         info!("Start marching");
@@ -229,7 +223,12 @@ fn update_chunk(
 
             if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
                 chunk_mesh.triangles.extend(triangles);
-                *mesh_handle = meshes.add(Mesh::from(chunk_mesh.clone()));
+                meshes.set_untracked(mesh_handle, Mesh::from(chunk_mesh.clone()));
+                // if let Some(m) = meshes.get_mut(mesh_handle) {
+                //     *m = Mesh::from(chunk_mesh.clone());
+                // }
+
+                // *mesh_handle = meshes.add(Mesh::from(chunk_mesh.clone()));
             }
         }
         None => {

@@ -1,6 +1,7 @@
 use bevy::{
     pbr::wireframe::{Wireframe, WireframeConfig, WireframePlugin},
     prelude::*,
+    render::primitives::Aabb,
 };
 use bevy_mod_picking::*;
 use chunk::{Chunk, ChunkMesh};
@@ -182,7 +183,13 @@ fn start_march(
 
 fn update_chunk(
     time: Res<Time>,
-    mut chunks: Query<(&Chunk, &mut Iter3d, &mut ChunkMesh, &Handle<Mesh>)>,
+    mut chunks: Query<(
+        &Chunk,
+        &mut Iter3d,
+        &mut ChunkMesh,
+        &Handle<Mesh>,
+        Option<&mut Aabb>,
+    )>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut timer: ResMut<MarchTimer>,
     mut start_event: EventReader<StartMarching>,
@@ -192,7 +199,7 @@ fn update_chunk(
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
 
     // TODO loop on multiple chunks at the same time
-    let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle) = chunks.single_mut();
+    let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) = chunks.single_mut();
 
     if start_event.iter().count() > 0 {
         info!("Start marching");
@@ -223,12 +230,11 @@ fn update_chunk(
 
             if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
                 chunk_mesh.triangles.extend(triangles);
-                meshes.set_untracked(mesh_handle, Mesh::from(chunk_mesh.clone()));
-                // if let Some(m) = meshes.get_mut(mesh_handle) {
-                //     *m = Mesh::from(chunk_mesh.clone());
-                // }
-
-                // *mesh_handle = meshes.add(Mesh::from(chunk_mesh.clone()));
+                let mesh = Mesh::from(chunk_mesh.clone());
+                if let Some(mut chunk_aabb) = chunk_aabb {
+                    *chunk_aabb = mesh.compute_aabb().unwrap()
+                }
+                meshes.set_untracked(mesh_handle, mesh);
             }
         }
         None => {

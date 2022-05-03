@@ -2,7 +2,9 @@ use bevy::{
     pbr::wireframe::{Wireframe, WireframeConfig, WireframePlugin},
     prelude::*,
     render::{primitives::Aabb, render_resource::WgpuFeatures, settings::WgpuSettings},
+    utils::Instant,
 };
+use bevy_inspector_egui::{Inspectable, InspectorPlugin};
 use bevy_mod_picking::*;
 use chunk::{Chunk, ChunkMesh};
 use iters::Iter3d;
@@ -14,9 +16,8 @@ mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 16;
+const CHUNK_SIZE: usize = 10;
 const TIMER_DURATION: f32 = 0.00001;
-const ISOLEVEL: f32 = 0.55;
 
 #[derive(Default)]
 struct StartMarching;
@@ -32,6 +33,18 @@ struct MarchCubeIndicator;
 #[derive(Component)]
 struct ChunkPoint;
 
+#[derive(Inspectable)]
+struct Data {
+    #[inspectable(min = 0.0, max = 1.0, speed = 0.01)]
+    isolevel: f32,
+}
+
+impl Default for Data {
+    fn default() -> Self {
+        Self { isolevel: 0.5 }
+    }
+}
+
 fn main() {
     let mut app = App::new();
     app.insert_resource(WindowDescriptor {
@@ -46,30 +59,33 @@ fn main() {
     .add_plugins(DefaultPlugins)
     .add_plugin(PickingPlugin)
     .add_plugin(InteractablePickingPlugin)
-    .add_plugin(DebugCursorPickingPlugin) // <- Adds the green debug cursor.
+    .add_plugin(DebugCursorPickingPlugin)
+    .add_plugin(InspectorPlugin::<Data>::new())
     .add_event::<StartMarching>()
     .add_startup_system(setup)
     .add_startup_system(setup_points)
     .add_system(select_event)
-    // .add_system(update_chunk_slow_mode)
     .add_system(update_chunk)
     .add_system(camera::fly_camera)
     .add_system(start_march)
+    .add_system(update_data)
     .add_system(update_points_color);
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        app.add_plugin(WireframePlugin)
-            .insert_resource(WireframeConfig { global: false });
+        // app.add_plugin(WireframePlugin)
+        // .insert_resource(WireframeConfig { global: false });
     }
 
     app.run();
 }
 
 fn setup(mut commands: Commands) {
+    let chunk_size = CHUNK_SIZE as f32 + CHUNK_SIZE as f32 / 2.0;
     commands
         .spawn_bundle(PerspectiveCameraBundle {
-            transform: Transform::from_xyz(7.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+            transform: Transform::from_xyz(chunk_size, chunk_size, chunk_size)
+                .looking_at(Vec3::ZERO, Vec3::Y),
             ..default()
         })
         .insert_bundle(PickingCameraBundle::default())
@@ -77,11 +93,11 @@ fn setup(mut commands: Commands) {
 
     commands.spawn_bundle(PointLightBundle {
         point_light: PointLight {
-            intensity: 1500.0,
+            intensity: chunk_size * 1000.0,
             shadows_enabled: false,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 10.0, -5.0),
+        transform: Transform::from_xyz(chunk_size, chunk_size, chunk_size),
         ..default()
     });
 }
@@ -115,13 +131,21 @@ fn setup_points(
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
-                let val = fbm.get([x as f64, z as f64]);
-                let val = (val + 1.0) / 2.0;
+                // let val = fbm.get([x as f64, z as f64]);
+                // let val = (val + 1.0) / 2.0;
 
-                let val = if (y as f64 / CHUNK_SIZE as f64) < val {
-                    1.0
-                } else {
+                // let val = if (y as f64 / CHUNK_SIZE as f64) < val {
+                //     1.0
+                // } else {
+                //     0.0
+                // };
+                let max = CHUNK_SIZE - 1;
+                let val = if x == 0 || x == max || y == 0 || y == max || z == 0 || z == max {
+                    // make border empty
                     0.0
+                } else {
+                    let val = simplex.get([x as f64, y as f64, z as f64]);
+                    (val + 1.0) / 2.0
                 };
                 points.push(val as f32);
                 commands
@@ -196,6 +220,12 @@ fn start_march(
     }
 }
 
+fn update_data(data: Res<Data>, mut start_marching_events: EventWriter<StartMarching>) {
+    if data.is_changed() {
+        start_marching_events.send_default();
+    }
+}
+
 fn update_chunk(
     mut chunks: Query<(
         &Chunk,
@@ -206,11 +236,12 @@ fn update_chunk(
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut start_event: EventReader<StartMarching>,
+    data: Res<Data>,
 ) {
     if start_event.iter().count() == 0 {
         return;
     }
-    info!("Start marching");
+    let start = Instant::now();
 
     let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) = chunks.single_mut();
     chunk_iter.reset();
@@ -223,18 +254,20 @@ fn update_chunk(
             grid_cell.value[i] = chunk.get(*v_pos);
         }
 
-        if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
+        if let Some(triangles) = march_cube(&grid_cell, data.isolevel) {
             chunk_mesh.triangles.extend(triangles);
         }
     }
     let mesh = Mesh::from(chunk_mesh.clone());
     if let Some(mut chunk_aabb) = chunk_aabb {
-        *chunk_aabb = mesh.compute_aabb().unwrap()
+        if let Some(aabb) = mesh.compute_aabb() {
+            *chunk_aabb = aabb;
+        }
     }
     meshes.set_untracked(mesh_handle, mesh);
     chunk_iter.reset();
 
-    info!("Marching over");
+    info!("Marching took {:?}", start.elapsed());
 }
 
 fn _update_chunk_slow_mode(
@@ -251,6 +284,7 @@ fn _update_chunk_slow_mode(
     mut start_event: EventReader<StartMarching>,
     mut indicator: Query<(&mut Transform, &mut Visibility), With<MarchCubeIndicator>>,
     mut marching: Local<bool>,
+    data: Res<Data>,
 ) {
     let (mut indicator_transform, mut indicator_visibility) = indicator.single_mut();
 
@@ -284,7 +318,7 @@ fn _update_chunk_slow_mode(
                 grid_cell.value[i] = chunk.get(*v_pos);
             }
 
-            if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
+            if let Some(triangles) = march_cube(&grid_cell, data.isolevel) {
                 chunk_mesh.triangles.extend(triangles);
                 let mesh = Mesh::from(chunk_mesh.clone());
                 if let Some(mut chunk_aabb) = chunk_aabb {
@@ -303,16 +337,20 @@ fn _update_chunk_slow_mode(
 }
 
 fn update_points_color(
-    chunk: Query<&Chunk, Changed<Chunk>>,
+    chunk: Query<&Chunk>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut q: Query<(&Transform, &mut Handle<StandardMaterial>, &mut Visibility), With<ChunkPoint>>,
+    data: Res<Data>,
 ) {
+    if !data.is_changed() {
+        return;
+    }
     for chunk in chunk.iter() {
         info!("updating point color");
         for (transform, mut mat, mut visibility) in q.iter_mut() {
             let val = chunk.get(transform.translation);
             *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
-            visibility.is_visible = val >= ISOLEVEL;
+            visibility.is_visible = val >= data.isolevel;
         }
     }
 }

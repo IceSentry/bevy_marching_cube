@@ -1,20 +1,20 @@
 use bevy::{
     pbr::wireframe::{Wireframe, WireframeConfig, WireframePlugin},
     prelude::*,
-    render::primitives::Aabb,
+    render::{primitives::Aabb, render_resource::WgpuFeatures, settings::WgpuSettings},
 };
 use bevy_mod_picking::*;
 use chunk::{Chunk, ChunkMesh};
 use iters::Iter3d;
 use marching_cube_tables::{EDGE_CONNECTION, EDGE_TABLE, TRIANGLE_TABLE};
-use noise::{NoiseFn, OpenSimplex};
+use noise::{Fbm, NoiseFn, OpenSimplex};
 
 mod camera;
 mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 10;
+const CHUNK_SIZE: usize = 16;
 const TIMER_DURATION: f32 = 0.00001;
 const ISOLEVEL: f32 = 0.55;
 
@@ -39,6 +39,10 @@ fn main() {
         canvas: Some(String::from("#bevy")),
         ..default()
     })
+    .insert_resource(WgpuSettings {
+        features: WgpuFeatures::POLYGON_MODE_LINE,
+        ..default()
+    })
     .add_plugins(DefaultPlugins)
     .add_plugin(PickingPlugin)
     .add_plugin(InteractablePickingPlugin)
@@ -47,7 +51,8 @@ fn main() {
     .add_startup_system(setup)
     .add_startup_system(setup_points)
     .add_system(select_event)
-    .add_system(update_chunk.after(select_event))
+    // .add_system(update_chunk_slow_mode)
+    .add_system(update_chunk)
     .add_system(camera::fly_camera)
     .add_system(start_march)
     .add_system(update_points_color);
@@ -81,6 +86,14 @@ fn setup(mut commands: Commands) {
     });
 }
 
+fn unlit_material(color: Color) -> StandardMaterial {
+    StandardMaterial {
+        base_color: color,
+        unlit: true,
+        ..default()
+    }
+}
+
 fn setup_points(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -91,22 +104,24 @@ fn setup_points(
         ..default()
     }));
 
-    let black = materials.add(Color::BLACK.into());
+    let black = materials.add(unlit_material(Color::BLACK));
 
     let simplex = OpenSimplex::new();
+    let mut fbm = Fbm::new();
+    fbm.lacunarity = 1.75;
 
     // TODO spawn multiple chunks
     let mut points = Vec::new();
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
-                let max = CHUNK_SIZE - 1;
-                let val = if x == 0 || x == max || y == 0 || y == max || z == 0 || z == max {
-                    // make border empty
-                    0.0
+                let val = fbm.get([x as f64, z as f64]);
+                let val = (val + 1.0) / 2.0;
+
+                let val = if (y as f64 / CHUNK_SIZE as f64) < val {
+                    1.0
                 } else {
-                    let val = simplex.get([x as f64, y as f64, z as f64]);
-                    (val + 1.0) / 2.0
+                    0.0
                 };
                 points.push(val as f32);
                 commands
@@ -136,8 +151,8 @@ fn setup_points(
                 ..default()
             }),
             ..default()
-        });
-    // .insert(Wireframe);
+        })
+        .insert(Wireframe);
 
     commands.insert_resource(MarchTimer(Timer::from_seconds(TIMER_DURATION, true)));
 
@@ -182,6 +197,47 @@ fn start_march(
 }
 
 fn update_chunk(
+    mut chunks: Query<(
+        &Chunk,
+        &mut Iter3d,
+        &mut ChunkMesh,
+        &Handle<Mesh>,
+        Option<&mut Aabb>,
+    )>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut start_event: EventReader<StartMarching>,
+) {
+    if start_event.iter().count() == 0 {
+        return;
+    }
+    info!("Start marching");
+
+    let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) = chunks.single_mut();
+    chunk_iter.reset();
+    chunk_mesh.triangles.clear();
+
+    for pos in chunk_iter.into_iter() {
+        let pos = pos.as_vec3();
+        let mut grid_cell = GridCell::new(pos);
+        for (i, v_pos) in grid_cell.vertex_position.iter().enumerate() {
+            grid_cell.value[i] = chunk.get(*v_pos);
+        }
+
+        if let Some(triangles) = march_cube(&grid_cell, ISOLEVEL) {
+            chunk_mesh.triangles.extend(triangles);
+        }
+    }
+    let mesh = Mesh::from(chunk_mesh.clone());
+    if let Some(mut chunk_aabb) = chunk_aabb {
+        *chunk_aabb = mesh.compute_aabb().unwrap()
+    }
+    meshes.set_untracked(mesh_handle, mesh);
+    chunk_iter.reset();
+
+    info!("Marching over");
+}
+
+fn _update_chunk_slow_mode(
     time: Res<Time>,
     mut chunks: Query<(
         &Chunk,
@@ -252,10 +308,11 @@ fn update_points_color(
     mut q: Query<(&Transform, &mut Handle<StandardMaterial>, &mut Visibility), With<ChunkPoint>>,
 ) {
     for chunk in chunk.iter() {
+        info!("updating point color");
         for (transform, mut mat, mut visibility) in q.iter_mut() {
             let val = chunk.get(transform.translation);
-            *mat = materials.add(Color::rgb(val, val, val).into());
-            visibility.is_visible = val >= ISOLEVEL || val == 0.0;
+            *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
+            visibility.is_visible = val >= ISOLEVEL;
         }
     }
 }

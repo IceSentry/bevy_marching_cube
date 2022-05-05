@@ -16,7 +16,8 @@ mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 12;
+const CHUNK_SIZE: usize = 4;
+const CHUNK_COUNT: usize = 1;
 #[derive(Default)]
 struct StartMarching;
 
@@ -27,7 +28,7 @@ struct Point(f32);
 struct MarchCubeIndicator;
 
 #[derive(Component)]
-struct ChunkPoint;
+struct DebugPoint;
 
 #[derive(Inspectable)]
 struct Data {
@@ -76,7 +77,7 @@ struct NoiseSettings {
     persistence: f64,
 
     #[inspectable()]
-    offset: UVec3,
+    offset: Vec3,
 
     #[inspectable(min = 0.1, max = 1.5, speed = 0.01)]
     scale: f32,
@@ -89,11 +90,15 @@ impl Default for NoiseSettings {
             frequency: Fbm::DEFAULT_FREQUENCY,
             lacunarity: 0.2,
             persistence: Fbm::DEFAULT_PERSISTENCE,
-            offset: UVec3::ZERO,
+            offset: Vec3::ZERO,
             scale: 1.0,
         }
     }
 }
+
+struct SelectedChunk(Option<Entity>);
+
+struct SelectChunk;
 
 fn main() {
     let mut app = App::new();
@@ -113,20 +118,23 @@ fn main() {
     .add_plugin(InspectorPlugin::<Data>::new())
     .add_plugin(InspectorPlugin::<NoiseSettings>::new())
     .add_event::<StartMarching>()
+    .add_event::<SelectChunk>()
     .add_startup_system(setup)
     .add_startup_system(setup_chunks)
-    .add_system(select_event)
+    .add_startup_system(spawn_debug_points)
     .add_system(update_chunk)
     .add_system(camera::fly_camera)
     .add_system(start_march)
     .add_system(update_data)
     .add_system(update_noise_values)
-    .add_system(update_points_color.after(update_noise_values));
+    .add_system(select_event)
+    .add_system(update_points_color.after(select_event))
+    .insert_resource(SelectedChunk(None));
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // app.add_plugin(WireframePlugin)
-        // .insert_resource(WireframeConfig { global: false });
+        app.add_plugin(WireframePlugin)
+            .insert_resource(WireframeConfig { global: false });
     }
 
     app.run();
@@ -154,6 +162,44 @@ fn setup(mut commands: Commands) {
     });
 }
 
+fn setup_chunks(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for x in 0..CHUNK_COUNT {
+        for z in 0..CHUNK_COUNT {
+            let pos = Vec3::new(
+                x as f32 * CHUNK_SIZE as f32,
+                0.0,
+                z as f32 * CHUNK_SIZE as f32,
+            );
+            info!("Spawning chunk at {pos:?}");
+            let size = CHUNK_SIZE;
+            let points = vec![0.0; (size + 1).pow(3)];
+            let chunk_mesh = ChunkMesh::default();
+            commands
+                .spawn_bundle(PbrBundle {
+                    mesh: meshes.add(Mesh::from(chunk_mesh.clone())),
+                    material: materials.add(StandardMaterial {
+                        base_color: Color::rgba(1.0, 0.0, 0.0, 0.0),
+                        alpha_mode: AlphaMode::Blend,
+                        cull_mode: None,
+                        ..default()
+                    }),
+                    transform: Transform::from_translation(pos),
+
+                    ..default()
+                })
+                .insert(Chunk::new(points, size))
+                .insert(Chunk::new_iter_3d(size as u32))
+                .insert(chunk_mesh)
+                .insert_bundle(PickableBundle::default())
+                .insert(Wireframe);
+        }
+    }
+}
+
 fn unlit_material(color: Color) -> StandardMaterial {
     StandardMaterial {
         base_color: color,
@@ -162,7 +208,7 @@ fn unlit_material(color: Color) -> StandardMaterial {
     }
 }
 
-fn setup_chunks(
+fn spawn_debug_points(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -180,50 +226,79 @@ fn setup_chunks(
                 mesh: icosphere.clone(),
                 material: black.clone(),
                 transform: Transform::from_translation(point.as_vec3()),
+                visibility: Visibility { is_visible: false },
                 ..default()
             })
-            .insert_bundle(PickableBundle::default())
-            .insert(ChunkPoint);
+            .insert(DebugPoint);
     }
-
-    spawn_chunk(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        CHUNK_SIZE,
-        Vec3::ZERO,
-    );
 }
 
-fn spawn_chunk(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    size: usize,
-    pos: Vec3,
+fn select_event(
+    mut events: EventReader<PickingEvent>,
+    transforms: Query<&Transform>,
+    mut selected: ResMut<SelectedChunk>,
+    mut select_chunk_event: EventWriter<SelectChunk>,
 ) {
-    let points = vec![0.0; (size + 1).pow(3)];
-    let chunk_mesh = ChunkMesh::default();
-    commands
-        .spawn_bundle(PbrBundle {
-            mesh: meshes.add(Mesh::from(chunk_mesh.clone())),
-            material: materials.add(StandardMaterial {
-                base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
-                ..default()
-            }),
-            transform: Transform::from_translation(pos),
-            ..default()
-        })
-        .insert(Chunk::new(points, size))
-        .insert(Chunk::new_iter_3d(size as u32))
-        .insert(chunk_mesh)
-        .insert(Wireframe);
+    for event in events.iter() {
+        if let PickingEvent::Clicked(entity) = event {
+            selected.0 = Some(*entity);
+            select_chunk_event.send(SelectChunk);
+            if let Ok(transform) = transforms.get(*entity) {
+                info!(
+                    "selected chunk {:?} at {:?}",
+                    *entity, transform.translation
+                )
+            }
+        }
+    }
 }
 
-fn update_noise_values(mut chunks: Query<&mut Chunk>, noise_settings: Res<NoiseSettings>) {
+fn update_points_color(
+    chunks: Query<(&Chunk, &Transform), Without<DebugPoint>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<
+        (
+            &mut Transform,
+            &mut Handle<StandardMaterial>,
+            &mut Visibility,
+        ),
+        With<DebugPoint>,
+    >,
+    data: Res<Data>,
+    noise_settings: Res<NoiseSettings>,
+    selected_chunk: Res<SelectedChunk>,
+    mut start_event: EventReader<SelectChunk>,
+) {
+    let chunk_entity = match selected_chunk.0 {
+        Some(e) => e,
+        _ => return,
+    };
+
+    if start_event.iter().count() > 0 || data.is_changed() || noise_settings.is_changed() {
+        info!("updating points");
+        if let Ok((chunk, chunk_transform)) = chunks.get(chunk_entity) {
+            let mut iter_3d = Chunk::new_iter_3d(chunk.size as u32);
+            for (mut transform, mut mat, mut visibility) in q.iter_mut() {
+                if let Some(point) = iter_3d.next() {
+                    let point = point.as_vec3();
+                    let val = chunk.get(point);
+                    transform.translation = point + chunk_transform.translation;
+                    visibility.is_visible = val >= data.isolevel || val == 0.0;
+                    *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
+                }
+            }
+        }
+    }
+}
+
+fn update_noise_values(
+    mut chunks: Query<(&mut Chunk, &Transform)>,
+    noise_settings: Res<NoiseSettings>,
+) {
     if !noise_settings.is_changed() {
         return;
     }
+    info!("update noise");
 
     let fbm = Fbm::new()
         .set_octaves(noise_settings.octaves)
@@ -231,40 +306,14 @@ fn update_noise_values(mut chunks: Query<&mut Chunk>, noise_settings: Res<NoiseS
         .set_lacunarity(noise_settings.lacunarity)
         .set_frequency(noise_settings.frequency);
 
-    for mut chunk in chunks.iter_mut() {
+    for (mut chunk, transform) in chunks.iter_mut() {
         for point in Chunk::new_iter_3d(chunk.size as u32) {
-            let max = chunk.size as u32;
-            let val = if point.x <= 0
-                || point.x >= max
-                || point.y <= 0
-                || point.y >= max
-                || point.z <= 0
-                || point.z >= max
-            {
-                // make border empty
-                0.0
-            } else {
-                let point = point + noise_settings.offset;
-                let val = fbm.get([point.x as f64, point.y as f64, point.z as f64]);
-                (val + 1.0) / 2.0
-            };
-            chunk.set(point.as_vec3(), val as f32 * noise_settings.scale);
-        }
-    }
-}
-
-fn select_event(
-    mut events: EventReader<PickingEvent>,
-    transforms: Query<&Transform>,
-    mut chunks: Query<&mut Chunk>,
-) {
-    let mut chunk = chunks.single_mut();
-    for event in events.iter() {
-        if let PickingEvent::Clicked(entity) = event {
-            if let Ok(&Transform { translation, .. }) = transforms.get(*entity) {
-                let value = chunk.get(translation);
-                chunk.set(translation, if value == 1.0 { 0.0 } else { 1.0 });
-            }
+            let offset = transform.translation + noise_settings.offset;
+            let point = point.as_vec3() + offset;
+            let val = fbm.get([point.x as f64, point.y as f64, point.z as f64]);
+            let val = (val + 1.0) / 2.0;
+            let point = point - offset;
+            chunk.set(point, val as f32 * noise_settings.scale);
         }
     }
 }
@@ -305,51 +354,32 @@ fn update_chunk(
     }
     let start = Instant::now();
 
-    let (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) = chunks.single_mut();
-    chunk_iter.reset();
-    chunk_mesh.triangles.clear();
+    // TODO par_for_each
+    for (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) in chunks.iter_mut() {
+        chunk_iter.reset();
+        chunk_mesh.triangles.clear();
 
-    for pos in chunk_iter.into_iter() {
-        let pos = pos.as_vec3();
-        let mut grid_cell = GridCell::new(pos);
-        for (i, v_pos) in grid_cell.vertex_position.iter().enumerate() {
-            grid_cell.value[i] = chunk.get(*v_pos);
-        }
+        for pos in chunk_iter.into_iter() {
+            let mut grid_cell = GridCell::new(pos.as_vec3());
+            for (i, v_pos) in grid_cell.vertex_position.iter().enumerate() {
+                grid_cell.value[i] = chunk.get(*v_pos);
+            }
 
-        if let Some(triangles) = march_cube(&grid_cell, data.isolevel) {
-            chunk_mesh.triangles.extend(triangles);
+            if let Some(triangles) = march_cube(&grid_cell, data.isolevel) {
+                chunk_mesh.triangles.extend(triangles);
+            }
         }
-    }
-    let mesh = Mesh::from(chunk_mesh.clone());
-    if let Some(mut chunk_aabb) = chunk_aabb {
-        if let Some(aabb) = mesh.compute_aabb() {
-            *chunk_aabb = aabb;
+        let mesh = Mesh::from(chunk_mesh.clone());
+        if let Some(mut chunk_aabb) = chunk_aabb {
+            if let Some(aabb) = mesh.compute_aabb() {
+                *chunk_aabb = aabb;
+            }
         }
+        meshes.set_untracked(mesh_handle, mesh);
+        chunk_iter.reset();
     }
-    meshes.set_untracked(mesh_handle, mesh);
-    chunk_iter.reset();
 
     info!("Marching took {:?}", start.elapsed());
-}
-
-fn update_points_color(
-    chunk: Query<&Chunk>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(&Transform, &mut Handle<StandardMaterial>, &mut Visibility), With<ChunkPoint>>,
-    data: Res<Data>,
-    noise_settings: Res<NoiseSettings>,
-) {
-    if !data.is_changed() && !noise_settings.is_changed() {
-        return;
-    }
-    for chunk in chunk.iter() {
-        info!("updating point color");
-        for (transform, mut mat, mut visibility) in q.iter_mut() {
-            let val = chunk.get(transform.translation);
-            *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
-            visibility.is_visible = val >= data.isolevel || val == 0.0;
-        }
-    }
 }
 
 /// March a single cube

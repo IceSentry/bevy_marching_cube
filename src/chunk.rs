@@ -26,7 +26,7 @@ impl Chunk {
     }
 
     pub fn new_iter_3d(size: u32) -> Iter3d {
-        Iter3d::new(UVec3::ZERO, UVec3::new(size - 1, size - 1, size - 1))
+        Iter3d::new(UVec3::ZERO, UVec3::new(size, size, size))
     }
 
     fn index(&self, pos: Vec3) -> usize {

@@ -571,6 +571,7 @@ dependencies = [
  "bevy-inspector-egui",
  "bevy_mod_picking",
  "noise",
+ "viewport-orientation-gizmo",
 ]
 
 [[package]]
@@ -3391,6 +3392,14 @@ name = "version_check"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
+
+[[package]]
+name = "viewport-orientation-gizmo"
+version = "0.3.1"
+source = "git+https://github.com/dtaralla/viewport-orientation-gizmo.git#09a75f2709d95a21ce95affac253d92d7e6a616c"
+dependencies = [
+ "bevy",
+]
 
 [[package]]
 name = "waker-fn"

@@ -2,6 +2,7 @@ use bevy::{
     pbr::wireframe::{Wireframe, WireframeConfig, WireframePlugin},
     prelude::*,
     render::{primitives::Aabb, render_resource::WgpuFeatures, settings::WgpuSettings},
+    tasks::ComputeTaskPool,
     utils::Instant,
 };
 use bevy_inspector_egui::{Inspectable, InspectorPlugin};
@@ -9,15 +10,17 @@ use bevy_mod_picking::*;
 use chunk::{Chunk, ChunkMesh};
 use iters::Iter3d;
 use marching_cube_tables::{EDGE_CONNECTION, EDGE_TABLE, TRIANGLE_TABLE};
-use noise::{Fbm, MultiFractal, NoiseFn};
+use noise::{Fbm, MultiFractal, NoiseFn, SuperSimplex};
+use viewport_orientation_gizmo::{TrackedRotator, ViewportOrientationGizmoPlugin};
 
 mod camera;
 mod chunk;
 mod iters;
 mod marching_cube_tables;
 
-const CHUNK_SIZE: usize = 4;
-const CHUNK_COUNT: usize = 1;
+const CHUNK_SIZE: usize = 16;
+const CHUNK_COUNT: usize = 2;
+
 #[derive(Default)]
 struct StartMarching;
 
@@ -34,11 +37,19 @@ struct DebugPoint;
 struct Data {
     #[inspectable(min = 0.0, max = 1.0, speed = 0.01)]
     isolevel: f32,
+    #[inspectable()]
+    show_all_points: bool,
+    #[inspectable()]
+    show_wireframe: bool,
 }
 
 impl Default for Data {
     fn default() -> Self {
-        Self { isolevel: 0.5 }
+        Self {
+            isolevel: 0.5,
+            show_all_points: false,
+            show_wireframe: false,
+        }
     }
 }
 
@@ -76,7 +87,7 @@ struct NoiseSettings {
     #[inspectable(min = 0.05, max = 2.0, speed = 0.05)]
     persistence: f64,
 
-    #[inspectable()]
+    #[inspectable(speed = 0.05)]
     offset: Vec3,
 
     #[inspectable(min = 0.1, max = 1.5, speed = 0.01)]
@@ -117,18 +128,21 @@ fn main() {
     .add_plugin(DebugCursorPickingPlugin)
     .add_plugin(InspectorPlugin::<Data>::new())
     .add_plugin(InspectorPlugin::<NoiseSettings>::new())
+    .add_plugin(ViewportOrientationGizmoPlugin::new())
     .add_event::<StartMarching>()
     .add_event::<SelectChunk>()
     .add_startup_system(setup)
     .add_startup_system(setup_chunks)
     .add_startup_system(spawn_debug_points)
-    .add_system(update_chunk)
+    .add_system(update_chunks)
+    .add_system(update_chunks_meshes.after(update_chunks))
     .add_system(camera::fly_camera)
     .add_system(start_march)
     .add_system(update_data)
     .add_system(update_noise_values)
     .add_system(select_event)
     .add_system(update_points_color.after(select_event))
+    .add_system(toggle_wireframe)
     .insert_resource(SelectedChunk(None));
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -140,7 +154,11 @@ fn main() {
     app.run();
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     let chunk_size = CHUNK_SIZE as f32 + CHUNK_SIZE as f32 / 2.0;
     commands
         .spawn_bundle(PerspectiveCameraBundle {
@@ -149,6 +167,7 @@ fn setup(mut commands: Commands) {
             ..default()
         })
         .insert_bundle(PickingCameraBundle::default())
+        .insert(TrackedRotator)
         .insert(camera::FlyCam);
 
     commands.spawn_bundle(PointLightBundle {
@@ -160,6 +179,14 @@ fn setup(mut commands: Commands) {
         transform: Transform::from_xyz(chunk_size, chunk_size, chunk_size),
         ..default()
     });
+
+    let plane_size = (CHUNK_SIZE * CHUNK_COUNT) as f32;
+    commands.spawn_bundle(PbrBundle {
+        mesh: meshes.add(Mesh::from(shape::Plane { size: plane_size })),
+        material: materials.add(Color::GREEN.into()),
+        transform: Transform::from_xyz(plane_size / 2.0, 0.0, plane_size / 2.0),
+        ..default()
+    });
 }
 
 fn setup_chunks(
@@ -167,12 +194,12 @@ fn setup_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    for x in 0..CHUNK_COUNT {
-        for z in 0..CHUNK_COUNT {
+    for x in -1..=1 {
+        for z in -1..=1 {
             let pos = Vec3::new(
-                x as f32 * CHUNK_SIZE as f32,
+                x as f32 * (CHUNK_SIZE as f32),
                 0.0,
-                z as f32 * CHUNK_SIZE as f32,
+                z as f32 * (CHUNK_SIZE as f32),
             );
             info!("Spawning chunk at {pos:?}");
             let size = CHUNK_SIZE;
@@ -182,8 +209,8 @@ fn setup_chunks(
                 .spawn_bundle(PbrBundle {
                     mesh: meshes.add(Mesh::from(chunk_mesh.clone())),
                     material: materials.add(StandardMaterial {
-                        base_color: Color::rgba(1.0, 0.0, 0.0, 0.0),
-                        alpha_mode: AlphaMode::Blend,
+                        base_color: Color::rgba(1.0, 0.0, 0.0, 1.0),
+                        // alpha_mode: AlphaMode::Blend,
                         cull_mode: None,
                         ..default()
                     }),
@@ -192,7 +219,7 @@ fn setup_chunks(
                     ..default()
                 })
                 .insert(Chunk::new(points, size))
-                .insert(Chunk::new_iter_3d(size as u32))
+                .insert(Chunk::new_iter_3d(size as u32 - 1))
                 .insert(chunk_mesh)
                 .insert_bundle(PickableBundle::default())
                 .insert(Wireframe);
@@ -220,7 +247,7 @@ fn spawn_debug_points(
 
     let black = materials.add(unlit_material(Color::BLACK));
 
-    for point in Chunk::new_iter_3d(CHUNK_SIZE as u32 + 1) {
+    for point in Chunk::new_iter_3d(CHUNK_SIZE as u32) {
         commands
             .spawn_bundle(PbrBundle {
                 mesh: icosphere.clone(),
@@ -274,18 +301,24 @@ fn update_points_color(
         _ => return,
     };
 
-    if start_event.iter().count() > 0 || data.is_changed() || noise_settings.is_changed() {
-        info!("updating points");
-        if let Ok((chunk, chunk_transform)) = chunks.get(chunk_entity) {
-            let mut iter_3d = Chunk::new_iter_3d(chunk.size as u32);
-            for (mut transform, mut mat, mut visibility) in q.iter_mut() {
-                if let Some(point) = iter_3d.next() {
-                    let point = point.as_vec3();
-                    let val = chunk.get(point);
-                    transform.translation = point + chunk_transform.translation;
-                    visibility.is_visible = val >= data.isolevel || val == 0.0;
-                    *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
-                }
+    if !(start_event.iter().count() > 0 || data.is_changed() || noise_settings.is_changed()) {
+        return;
+    }
+
+    info!("updating points");
+    if let Ok((chunk, chunk_transform)) = chunks.get(chunk_entity) {
+        let mut iter_3d = Chunk::new_iter_3d(chunk.size as u32);
+        for (mut transform, mut mat, mut visibility) in q.iter_mut() {
+            if let Some(point) = iter_3d.next() {
+                let point = point.as_vec3();
+                let val = chunk.get(point);
+                transform.translation = point + chunk_transform.translation;
+                *mat = materials.add(unlit_material(Color::rgb(val, val, val)));
+                visibility.is_visible = if data.show_all_points {
+                    true
+                } else {
+                    val >= data.isolevel || val == 0.0
+                };
             }
         }
     }
@@ -300,17 +333,18 @@ fn update_noise_values(
     }
     info!("update noise");
 
-    let fbm = Fbm::new()
+    let noise = Fbm::new()
         .set_octaves(noise_settings.octaves)
         .set_persistence(noise_settings.persistence)
         .set_lacunarity(noise_settings.lacunarity)
         .set_frequency(noise_settings.frequency);
+    // let noise = SuperSimplex::new();
 
     for (mut chunk, transform) in chunks.iter_mut() {
-        for point in Chunk::new_iter_3d(chunk.size as u32) {
+        for point in Chunk::new_iter_3d(chunk.size as u32 + 1) {
             let offset = transform.translation + noise_settings.offset;
             let point = point.as_vec3() + offset;
-            let val = fbm.get([point.x as f64, point.y as f64, point.z as f64]);
+            let val = noise.get([point.x as f64, point.y as f64, point.z as f64]);
             let val = (val + 1.0) / 2.0;
             let point = point - offset;
             chunk.set(point, val as f32 * noise_settings.scale);
@@ -337,25 +371,18 @@ fn update_data(
     }
 }
 
-fn update_chunk(
-    mut chunks: Query<(
-        &Chunk,
-        &mut Iter3d,
-        &mut ChunkMesh,
-        &Handle<Mesh>,
-        Option<&mut Aabb>,
-    )>,
-    mut meshes: ResMut<Assets<Mesh>>,
+fn update_chunks(
+    mut chunks: Query<(&Chunk, &mut Iter3d, &mut ChunkMesh)>,
     mut start_event: EventReader<StartMarching>,
     data: Res<Data>,
+    pool: Res<ComputeTaskPool>,
 ) {
     if start_event.iter().count() == 0 {
         return;
     }
     let start = Instant::now();
 
-    // TODO par_for_each
-    for (chunk, mut chunk_iter, mut chunk_mesh, mesh_handle, chunk_aabb) in chunks.iter_mut() {
+    chunks.par_for_each_mut(&pool, 1, |(chunk, mut chunk_iter, mut chunk_mesh)| {
         chunk_iter.reset();
         chunk_mesh.triangles.clear();
 
@@ -369,6 +396,18 @@ fn update_chunk(
                 chunk_mesh.triangles.extend(triangles);
             }
         }
+        chunk_iter.reset();
+    });
+
+    info!("Marching took {:?}", start.elapsed());
+}
+
+fn update_chunks_meshes(
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut chunks: Query<(&mut ChunkMesh, &Handle<Mesh>, Option<&mut Aabb>), Changed<ChunkMesh>>,
+) {
+    // TODO create meshes in parallel then update the handles and aabb
+    for (chunk_mesh, mesh_handle, chunk_aabb) in chunks.iter_mut() {
         let mesh = Mesh::from(chunk_mesh.clone());
         if let Some(mut chunk_aabb) = chunk_aabb {
             if let Some(aabb) = mesh.compute_aabb() {
@@ -376,10 +415,30 @@ fn update_chunk(
             }
         }
         meshes.set_untracked(mesh_handle, mesh);
-        chunk_iter.reset();
+    }
+}
+
+fn toggle_wireframe(
+    mut commands: Commands,
+    data: Res<Data>,
+    wireframes: Query<&Wireframe>,
+    chunks: Query<Entity, With<Chunk>>,
+) {
+    if !data.is_changed() {
+        return;
     }
 
-    info!("Marching took {:?}", start.elapsed());
+    for chunk in chunks.iter() {
+        if data.show_wireframe {
+            if wireframes.get(chunk).is_err() {
+                commands.entity(chunk).insert(Wireframe);
+            }
+        } else {
+            if wireframes.get(chunk).is_ok() {
+                commands.entity(chunk).remove::<Wireframe>();
+            }
+        }
+    }
 }
 
 /// March a single cube

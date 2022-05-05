@@ -25,8 +25,8 @@ impl Chunk {
         self.points[index] = value;
     }
 
-    pub fn new_iter(size: u32) -> Iter3d {
-        Iter3d::new(UVec3::ZERO, UVec3::new(size - 2, size - 2, size - 2))
+    pub fn new_iter_3d(size: u32) -> Iter3d {
+        Iter3d::new(UVec3::ZERO, UVec3::new(size - 1, size - 1, size - 1))
     }
 
     fn index(&self, pos: Vec3) -> usize {
